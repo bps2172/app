@@ -1,0 +1,66 @@
+{
+  "name": "Reservasi Aula BPS Kota Tanjungpinang",
+  "short_name": "Reservasi Aula BPS",
+  "description": "Sistem Reservasi Aula BPS Kota Tanjungpinang - Progressive Web App dengan fitur pencarian cerdas",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#f8fafc",
+  "theme_color": "#1e40af",
+  "orientation": "portrait-primary",
+  "scope": "./",
+  "lang": "id",
+  "dir": "ltr",
+  "categories": ["productivity", "business"],
+  "version": "2.0.0",
+  "icons": [
+    {
+      "src": "logo.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "logo.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ],
+  "screenshots": [
+    {
+      "src": "logo.png",
+      "sizes": "1280x720",
+      "type": "image/png",
+      "form_factor": "wide",
+      "label": "Reservasi Aula BPS - Desktop View dengan Pencarian Cerdas"
+    },
+    {
+      "src": "logo.png", 
+      "sizes": "750x1334",
+      "type": "image/png",
+      "form_factor": "narrow",
+      "label": "Reservasi Aula BPS - Mobile View dengan Pencarian Cerdas"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "Tambah Reservasi",
+      "short_name": "Tambah",
+      "description": "Tambah reservasi baru dengan pencarian cerdas",
+      "url": "./index.html#add",
+      "icons": [
+        {
+          "src": "logo.png",
+          "sizes": "96x96"
+        }
+      ]
+    }
+  ],
+  "prefer_related_applications": false,
+  "edge_side_panel": {
+    "preferred_width": 400
+  },
+  "launch_handler": {
+    "client_mode": "navigate-existing"
+  }
+}
