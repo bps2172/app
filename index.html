@@ -2055,16 +2055,16 @@
 
         function generateWhatsAppMessage(booking) {
             const formattedDate = formatDate(booking.tanggal);
-            return `🏢 *RESERVASI AULA BPS KOTA TANJUNGPINANG*
+            return `*RESERVASI AULA BPS KOTA TANJUNGPINANG*
 
-📅 Tanggal: ${formattedDate}
-🎯 Kegiatan: ${booking.kegiatan}
-👤 Penanggung Jawab: ${booking.penanggung_jawab}
-👥 Jumlah Peserta: ${booking.peserta} orang
-🍽️ Konsumsi: ${booking.konsumsi}
-⏰ Waktu: ${booking.jam_mulai} - ${booking.jam_selesai}
+Tanggal: ${formattedDate}
+Kegiatan: ${booking.kegiatan}
+Penanggung Jawab: ${booking.penanggung_jawab}
+Jumlah Peserta: ${booking.peserta} orang
+Konsumsi: ${booking.konsumsi}
+Waktu: ${booking.jam_mulai} - ${booking.jam_selesai}
 
-_Pesan ini dikirim dari Sistem Reservasi Aula BPS_`;
+Pesan ini dikirim dari Sistem Reservasi Aula BPS`;
         }
 
         function updateStatistics(stats) {
