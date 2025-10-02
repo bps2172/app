@@ -1382,686 +1382,954 @@
 
     <!-- JavaScript -->
     <script>
-        // Configuration
-        const CONFIG = {
-            scriptURL: 'https://script.google.com/macros/s/AKfycbwU9ATc9cCgCcokOXFbT7NZ1Xogyi6Ft_4CO4y-w6FJ19ihfJBjSQGAS_Go7GMuD9B0/exec',
-            itemsPerPage: 10,
-            maxRetries: 3,
-            retryDelay: 1000,
-            autoRefreshInterval: 60000 // 60 seconds instead of 30
-        };
+        // ============================================
+// BOOKING SYSTEM v3.0.0 - FULL JAVASCRIPT
+// Lock Service + Client-Side Pagination
+// ============================================
 
-        // Global Variables
-        let bookingsData = [];
-        let currentPage = 1;
-        let totalPages = 1;
-        let totalItems = 0;
-        let isLoading = false;
-        let currentEditId = null;
-        let currentDeleteId = null;
-        let penanggungJawabOptions = []; // Will be loaded from sheet
-        let konsumsiOptions = []; // Will be loaded from sheet
-        let autoRefreshTimer = null;
-        let isSubmitting = false; // Add to prevent double submissions
+const CONFIG = {
+    scriptURL: 'https://script.google.com/macros/s/AKfycbwyAyFIszgCDwl9eJP25Zng26m5yokqhwtxEwkew-rhEZgWXpe65w-7kZKw-qkzyBQg/exec',
+    itemsPerPage: 10,
+    maxRetries: 3,
+    retryDelay: 1000,
+    autoRefreshInterval: 120000, // 2 minutes
+    cacheTimeout: 300000 // 5 minutes
+};
 
-        // Initialize Application
-        document.addEventListener('DOMContentLoaded', function () {
-            console.log('DOM Content Loaded');
-            console.log('CONFIG.scriptURL:', CONFIG.scriptURL);
+// Global Variables
+let allBookingsData = [];
+let filteredBookingsData = [];
+let currentPage = 1;
+let totalPages = 1;
+let totalItems = 0;
+let isLoading = false;
+let isSubmitting = false;
+let currentEditId = null;
+let currentDeleteId = null;
+let penanggungJawabOptions = [];
+let konsumsiOptions = [];
+let autoRefreshTimer = null;
+let lastDataLoadTime = 0;
 
-            // Check if scriptURL is set
-            if (CONFIG.scriptURL === 'YOUR_GOOGLE_APPS_SCRIPT_URL_HERE') {
-                console.error('❌ SCRIPT URL BELUM DISET!');
-                showNotification('Error: Google Apps Script URL belum diset. Update CONFIG.scriptURL di HTML file.', 'error');
-                return;
-            }
+// Initialize Application
+document.addEventListener('DOMContentLoaded', function () {
+    console.log('Booking System v3.0 - Client-Side Pagination');
+    
+    if (CONFIG.scriptURL === 'YOUR_GOOGLE_APPS_SCRIPT_URL_HERE') {
+        showNotification('Error: Google Apps Script URL belum diset!', 'error');
+        return;
+    }
 
-            console.log('✅ Script URL sudah diset');
-            initializeApp();
-        });
+    initializeApp();
+    checkForUpdates();
+});
 
-        async function initializeApp() {
-            // Initialize animations
-            initializeAnimations();
+async function initializeApp() {
+    initializeAnimations();
+    updateCurrentDateTime();
+    setInterval(updateCurrentDateTime, 1000);
 
-            // Update datetime
-            updateCurrentDateTime();
-            setInterval(updateCurrentDateTime, 1000);
+    showLoadingOverlay(true);
 
-            // Show initial loading for everything
-            showLoadingOverlay(true);
+    try {
+        await Promise.all([
+            loadPenanggungJawabOptions(),
+            loadKonsumsiOptions()
+        ]);
 
-            try {
-                // Load dropdown options from sheets ONCE at startup
-                await Promise.all([
-                    loadPenanggungJawabOptions(),
-                    loadKonsumsiOptions()
-                ]);
+        await loadAllBookings();
+        await loadStatistics();
+    } catch (error) {
+        console.error('Error initializing app:', error);
+        showNotification('Gagal memuat aplikasi: ' + error.message, 'error');
+    } finally {
+        showLoadingOverlay(false);
+    }
 
-                // Load main data
-                await loadBookings();
-                await loadStatistics();
+    startAutoRefresh();
+}
 
-            } catch (error) {
-                console.error('Error initializing app:', error);
-                showNotification('Gagal memuat aplikasi: ' + error.message, 'error');
-            } finally {
-                // Hide loading overlay after everything is loaded
-                showLoadingOverlay(false);
-            }
+function initializeAnimations() {
+    anime({
+        targets: '.fade-in',
+        opacity: [0, 1],
+        duration: 800,
+        easing: 'easeOutQuad'
+    });
 
-            // Start controlled auto-refresh (60 seconds)
-            startAutoRefresh();
-        }
+    anime({
+        targets: '.slide-up',
+        translateY: [30, 0],
+        opacity: [0, 1],
+        duration: 800,
+        delay: 200,
+        easing: 'easeOutQuad'
+    });
 
-        function initializeAnimations() {
-            // Animate header
-            anime({
-                targets: '.fade-in',
-                opacity: [0, 1],
-                duration: 800,
-                easing: 'easeOutQuad'
-            });
+    anime({
+        targets: '.scale-in',
+        scale: [0.9, 1],
+        opacity: [0, 1],
+        duration: 800,
+        delay: 400,
+        easing: 'easeOutQuad'
+    });
+}
 
-            // Animate stats cards
-            anime({
-                targets: '.slide-up',
-                translateY: [30, 0],
-                opacity: [0, 1],
-                duration: 800,
-                delay: 200,
-                easing: 'easeOutQuad'
-            });
+// ============================================
+// LOAD ALL BOOKINGS - CLIENT-SIDE PAGINATION
+// ============================================
+async function loadAllBookings(showLoading = true, forceReload = false) {
+    const now = Date.now();
+    if (!forceReload && allBookingsData.length > 0 && (now - lastDataLoadTime) < CONFIG.cacheTimeout) {
+        console.log('Using cached data');
+        renderCurrentPage();
+        return;
+    }
 
-            // Animate main card
-            anime({
-                targets: '.scale-in',
-                scale: [0.9, 1],
-                opacity: [0, 1],
-                duration: 800,
-                delay: 400,
-                easing: 'easeOutQuad'
-            });
-        }
+    if (isLoading) return;
+    isLoading = true;
 
-        function startAutoRefresh() {
-            // Clear existing timer
-            if (autoRefreshTimer) {
-                clearInterval(autoRefreshTimer);
-            }
+    if (showLoading && allBookingsData.length === 0) {
+        showTableLoadingState(true);
+    } else if (showLoading) {
+        showLoadingOverlay(true);
+    }
 
-            // Set new timer with longer interval
-            autoRefreshTimer = setInterval(async () => {
-                if (!isLoading && !isSubmitting) {
-                    await loadBookings(currentPage, false); // false = silent refresh
-                    await loadStatistics();
-                }
-            }, CONFIG.autoRefreshInterval);
-        }
+    try {
+        const response = await makeRequest('getBookings');
 
-        function stopAutoRefresh() {
-            if (autoRefreshTimer) {
-                clearInterval(autoRefreshTimer);
-                autoRefreshTimer = null;
-            }
-        }
+        if (response.success) {
+            allBookingsData = response.data || [];
+            lastDataLoadTime = Date.now();
+            
+            console.log(`Loaded ${allBookingsData.length} bookings`);
 
-        // Date Time Functions
-        function updateCurrentDateTime() {
-            const now = new Date();
-            const options = {
-                weekday: 'long',
-                year: 'numeric',
-                month: 'long',
-                day: 'numeric',
-                hour: '2-digit',
-                minute: '2-digit',
-                second: '2-digit',
-                timeZone: 'Asia/Jakarta'
-            };
+            prepareBookingsData();
 
-            const formatter = new Intl.DateTimeFormat('id-ID', options);
-            document.getElementById('currentDateTime').textContent = formatter.format(now);
-        }
-
-        // Status Calculation
-        function calculateStatus(tanggal, jamMulai, jamSelesai) {
-            const now = new Date();
-            const currentDate = now.toISOString().split('T')[0];
-            const currentTime = now.toTimeString().split(' ')[0].substring(0, 5);
-
-            const bookingDate = tanggal;
-
-            if (bookingDate > currentDate) {
-                return 'belum-mulai';
-            } else if (bookingDate < currentDate) {
-                return 'selesai';
-            } else {
-                // Same date, check time
-                if (currentTime < jamMulai) {
-                    return 'belum-mulai';
-                } else if (currentTime >= jamMulai && currentTime <= jamSelesai) {
-                    return 'berlangsung';
-                } else {
-                    return 'selesai';
-                }
-            }
-        }
-
-        // Load Functions
-        async function loadPenanggungJawabOptions() {
-            try {
-                const response = await makeRequest('getPJList');
-
-                if (response.success) {
-                    penanggungJawabOptions = response.data || [];
-                    initializeSearchableSelect('penanggungJawab', penanggungJawabOptions);
-                    initializeSearchableSelect('editPenanggungJawab', penanggungJawabOptions);
-                    console.log('✅ Penanggung Jawab options loaded:', penanggungJawabOptions.length);
-                } else {
-                    throw new Error(response.message || 'Gagal memuat daftar Penanggung Jawab');
-                }
-            } catch (error) {
-                console.error('Error loading PJ options:', error);
-                showNotification('Gagal memuat daftar Penanggung Jawab: ' + error.message, 'error');
-                // Set fallback empty array
-                penanggungJawabOptions = [];
-            }
-        }
-
-        async function loadKonsumsiOptions() {
-            try {
-                const response = await makeRequest('getKonsumsiList');
-
-                if (response.success) {
-                    konsumsiOptions = response.data || [];
-                    initializeSearchableSelect('konsumsi', konsumsiOptions);
-                    initializeSearchableSelect('editKonsumsi', konsumsiOptions);
-                    console.log('✅ Konsumsi options loaded:', konsumsiOptions.length);
-                } else {
-                    throw new Error(response.message || 'Gagal memuat daftar Konsumsi');
-                }
-            } catch (error) {
-                console.error('Error loading Konsumsi options:', error);
-                showNotification('Gagal memuat daftar Konsumsi: ' + error.message, 'error');
-                // Set fallback array
-                konsumsiOptions = ['Tidak ada', '1x Snack', '2x Snack', '1x Snack + Makan Siang', '2x Snack + Makan Siang'];
-                initializeSearchableSelect('konsumsi', konsumsiOptions);
-                initializeSearchableSelect('editKonsumsi', konsumsiOptions);
-            }
-        }
-
-        // Searchable Select Implementation
-        function initializeSearchableSelect(inputId, options) {
-            const container = document.getElementById(inputId + 'Container');
-            const input = document.getElementById(inputId);
-            const dropdown = document.getElementById(inputId + 'Dropdown');
-
-            if (!container || !input || !dropdown) {
-                console.warn(`Searchable select elements not found for ${inputId}`);
-                return;
-            }
-
-            let highlightedIndex = -1;
-            let filteredOptions = [...options];
-
-            // Populate dropdown
-            function populateDropdown(optionsToShow) {
-                dropdown.innerHTML = '';
-
-                if (optionsToShow.length === 0) {
-                    dropdown.innerHTML = '<div class="no-options">Tidak ada pilihan yang cocok</div>';
-                    return;
-                }
-
-                optionsToShow.forEach((option, index) => {
-                    const optionDiv = document.createElement('div');
-                    optionDiv.className = 'searchable-option';
-                    optionDiv.textContent = option;
-                    optionDiv.setAttribute('data-value', option);
-                    optionDiv.setAttribute('data-index', index);
-
-                    optionDiv.addEventListener('click', () => {
-                        selectOption(option);
-                    });
-
-                    dropdown.appendChild(optionDiv);
-                });
-            }
-
-            // Filter options based on input
-            function filterOptions(query) {
-                if (!query.trim()) {
-                    filteredOptions = [...options];
-                } else {
-                    filteredOptions = options.filter(option =>
-                        option.toLowerCase().includes(query.toLowerCase())
-                    );
-                }
-                populateDropdown(filteredOptions);
-                highlightedIndex = -1;
-            }
-
-            // Select an option
-            function selectOption(value) {
-                input.value = value;
-                input.classList.add('has-value');
-                hideDropdown();
-
-                // Trigger change event
-                input.dispatchEvent(new Event('change'));
-            }
-
-            // Show dropdown
-            function showDropdown() {
-                dropdown.classList.add('show');
-                container.classList.add('active');
-                filterOptions(input.value);
-            }
-
-            // Hide dropdown
-            function hideDropdown() {
-                dropdown.classList.remove('show');
-                container.classList.remove('active');
-                highlightedIndex = -1;
-            }
-
-            // Highlight option
-            function highlightOption(index) {
-                const options = dropdown.querySelectorAll('.searchable-option');
-                options.forEach(opt => opt.classList.remove('highlighted'));
-
-                if (index >= 0 && index < options.length) {
-                    options[index].classList.add('highlighted');
-                    highlightedIndex = index;
-                }
-            }
-
-            // Event listeners
-            input.addEventListener('focus', () => {
-                showDropdown();
-            });
-
-            input.addEventListener('input', (e) => {
-                const query = e.target.value;
-                if (query.trim()) {
-                    input.classList.add('has-value');
-                } else {
-                    input.classList.remove('has-value');
-                }
-                filterOptions(query);
-                showDropdown();
-            });
-
-            input.addEventListener('keydown', (e) => {
-                const optionElements = dropdown.querySelectorAll('.searchable-option:not(.no-options)');
-
-                switch (e.key) {
-                    case 'ArrowDown':
-                        e.preventDefault();
-                        if (highlightedIndex < optionElements.length - 1) {
-                            highlightOption(highlightedIndex + 1);
-                        }
-                        break;
-
-                    case 'ArrowUp':
-                        e.preventDefault();
-                        if (highlightedIndex > 0) {
-                            highlightOption(highlightedIndex - 1);
-                        }
-                        break;
-
-                    case 'Enter':
-                        e.preventDefault();
-                        if (highlightedIndex >= 0 && optionElements[highlightedIndex]) {
-                            const value = optionElements[highlightedIndex].getAttribute('data-value');
-                            selectOption(value);
-                        }
-                        break;
-
-                    case 'Escape':
-                        hideDropdown();
-                        break;
-                }
-            });
-
-            // Click outside to close
-            document.addEventListener('click', (e) => {
-                if (!container.contains(e.target)) {
-                    hideDropdown();
-                }
-            });
-
-            // Initial population
-            populateDropdown(options);
-        }
-
-        // Form Functions
-        function resetAddForm() {
-            document.getElementById('addForm').reset();
-
-            // Reset searchable select values
-            const pjInput = document.getElementById('penanggungJawab');
-            const konsumsiInput = document.getElementById('konsumsi');
-
-            pjInput.classList.remove('has-value');
-            konsumsiInput.classList.remove('has-value');
-
-            // Hide any open dropdowns
-            document.querySelectorAll('.searchable-dropdown').forEach(dropdown => {
-                dropdown.classList.remove('show');
-            });
-            document.querySelectorAll('.searchable-select').forEach(container => {
-                container.classList.remove('active');
-            });
-        }
-
-        async function loadBookings(page = 1, showLoading = true) {
-            if (isLoading) return;
-
-            isLoading = true;
-
-            // Show different loading states based on whether it's initial load or refresh
-            if (showLoading) {
-                if (bookingsData.length === 0) {
-                    // Initial load - show table loading state
-                    showTableLoadingState(true);
-                } else {
-                    // Refresh - show overlay
-                    showLoadingOverlay(true);
-                }
-            }
-
-            try {
-                const response = await makeRequest('getBookings', {
-                    page: page,
-                    per_page: CONFIG.itemsPerPage
-                });
-
-                if (response.success) {
-                    bookingsData = response.data || [];
-                    currentPage = response.pagination?.current_page || 1;
-                    totalPages = response.pagination?.last_page || 1;
-                    totalItems = response.pagination?.total || 0;
-
-                    // Show table and render data
-                    showTableLoadingState(false);
-                    showTable(true);
-
-                    renderBookingsTable();
-                    renderPagination();
-
-                    if (bookingsData.length === 0) {
-                        showEmptyState(true);
-                        showTable(false);
-                    } else {
-                        showEmptyState(false);
-                    }
-                } else {
-                    throw new Error(response.message || 'Gagal memuat data');
-                }
-            } catch (error) {
-                console.error('Error loading bookings:', error);
-                showNotification('Gagal memuat data: ' + error.message, 'error');
-                showTableLoadingState(false);
+            showTableLoadingState(false);
+            
+            if (allBookingsData.length === 0) {
                 showEmptyState(true);
                 showTable(false);
-            } finally {
-                isLoading = false;
-                if (showLoading) {
-                    showLoadingOverlay(false);
+            } else {
+                showEmptyState(false);
+                showTable(true);
+                renderCurrentPage();
+            }
+        } else {
+            throw new Error(response.message || 'Gagal memuat data');
+        }
+    } catch (error) {
+        console.error('Error loading bookings:', error);
+        showNotification('Gagal memuat data: ' + error.message, 'error');
+        showTableLoadingState(false);
+        showEmptyState(true);
+        showTable(false);
+    } finally {
+        isLoading = false;
+        if (showLoading) {
+            showLoadingOverlay(false);
+        }
+    }
+}
+
+function prepareBookingsData() {
+    filteredBookingsData = allBookingsData.map(booking => ({
+        ...booking,
+        status: calculateStatus(booking.tanggal, booking.jam_mulai, booking.jam_selesai),
+        status_priority: 0
+    }));
+
+    filteredBookingsData.forEach(booking => {
+        booking.status_priority = getStatusPriority(booking.status);
+    });
+
+    filteredBookingsData.sort((a, b) => {
+        if (a.status_priority !== b.status_priority) {
+            return a.status_priority - b.status_priority;
+        }
+
+        if (a.status === 'selesai' && b.status === 'selesai') {
+            if (a.tanggal !== b.tanggal) {
+                return new Date(b.tanggal) - new Date(a.tanggal);
+            }
+            return (b.jam_mulai || '00:00').localeCompare(a.jam_mulai || '00:00');
+        }
+
+        if (a.tanggal !== b.tanggal) {
+            return new Date(a.tanggal) - new Date(b.tanggal);
+        }
+        return (a.jam_mulai || '00:00').localeCompare(b.jam_mulai || '00:00');
+    });
+
+    totalItems = filteredBookingsData.length;
+    totalPages = Math.ceil(totalItems / CONFIG.itemsPerPage);
+    
+    if (currentPage > totalPages && totalPages > 0) {
+        currentPage = totalPages;
+    }
+    if (currentPage < 1) {
+        currentPage = 1;
+    }
+}
+
+function getStatusPriority(status) {
+    switch (status) {
+        case 'berlangsung': return 1;
+        case 'belum-mulai': return 2;
+        case 'selesai': return 3;
+        default: return 4;
+    }
+}
+
+function calculateStatus(tanggal, jamMulai, jamSelesai) {
+    const now = new Date();
+    const currentDate = now.toISOString().split('T')[0];
+    const currentTime = now.toTimeString().split(' ')[0].substring(0, 5);
+
+    if (tanggal > currentDate) {
+        return 'belum-mulai';
+    } else if (tanggal < currentDate) {
+        return 'selesai';
+    } else {
+        if (currentTime < jamMulai) {
+            return 'belum-mulai';
+        } else if (currentTime >= jamMulai && currentTime <= jamSelesai) {
+            return 'berlangsung';
+        } else {
+            return 'selesai';
+        }
+    }
+}
+
+// ============================================
+// RENDER CURRENT PAGE (INSTANT!)
+// ============================================
+function renderCurrentPage() {
+    const startIndex = (currentPage - 1) * CONFIG.itemsPerPage;
+    const endIndex = startIndex + CONFIG.itemsPerPage;
+    const pageData = filteredBookingsData.slice(startIndex, endIndex);
+
+    renderBookingsTable(pageData, startIndex);
+    renderPagination();
+}
+
+function renderBookingsTable(pageData, startIndex) {
+    const tbody = document.getElementById('bookingTableBody');
+    tbody.innerHTML = '';
+
+    if (pageData.length === 0) return;
+
+    pageData.forEach((booking, index) => {
+        const globalIndex = startIndex + index + 1;
+        const row = createBookingRow(booking, globalIndex, booking.status);
+        tbody.appendChild(row);
+    });
+
+    anime({
+        targets: 'tbody tr',
+        translateX: [-20, 0],
+        opacity: [0, 1],
+        duration: 300,
+        delay: anime.stagger(30),
+        easing: 'easeOutQuad'
+    });
+}
+
+function createBookingRow(booking, index, status) {
+    const row = document.createElement('tr');
+    const statusClass = getStatusClass(status);
+    const statusIcon = getStatusIcon(status);
+    const statusText = getStatusText(status);
+    const formattedDate = formatDate(booking.tanggal);
+    const whatsappMessage = generateWhatsAppMessage(booking);
+    const whatsappURL = `https://wa.me/?text=${encodeURIComponent(whatsappMessage)}`;
+
+    row.innerHTML = `
+        <td>${index}</td>
+        <td>${formattedDate}</td>
+        <td>${booking.kegiatan}</td>
+        <td>${booking.penanggung_jawab}</td>
+        <td style="text-align: center;">${booking.peserta}</td>
+        <td>${booking.konsumsi}</td>
+        <td style="text-align: center;">${booking.jam_mulai}</td>
+        <td style="text-align: center;">${booking.jam_selesai}</td>
+        <td style="text-align: center;">
+            <span class="status-item ${statusClass}">
+                <i class="${statusIcon}"></i>${statusText}
+            </span>
+        </td>
+        <td>
+            <div class="action-buttons">
+                <button onclick="openEditModal(${booking.id})" class="btn-sm btn-edit" title="Edit">
+                    <i class="fas fa-edit"></i>
+                </button>
+                <button onclick="openDeleteModal(${booking.id})" class="btn-sm btn-delete" title="Hapus">
+                    <i class="fas fa-trash"></i>
+                </button>
+                <a href="${whatsappURL}" target="_blank" class="btn-sm btn-whatsapp" title="Kirim via WhatsApp">
+                    <i class="fab fa-whatsapp"></i>
+                </a>
+            </div>
+        </td>
+    `;
+
+    return row;
+}
+
+// ============================================
+// PAGINATION (INSTANT - NO LOADING!)
+// ============================================
+function goToPage(page) {
+    if (page < 1 || page > totalPages || page === currentPage) return;
+    
+    currentPage = page;
+    renderCurrentPage();
+    
+    document.querySelector('.main-card').scrollIntoView({ 
+        behavior: 'smooth', 
+        block: 'start' 
+    });
+}
+
+function renderPagination() {
+    const paginationContainer = document.getElementById('paginationContainer');
+    const paginationControls = document.getElementById('paginationControls');
+    const showingFrom = document.getElementById('showingFrom');
+    const showingTo = document.getElementById('showingTo');
+    const totalRecords = document.getElementById('totalRecords');
+
+    if (totalItems === 0) {
+        paginationContainer.style.display = 'none';
+        return;
+    }
+
+    const from = (currentPage - 1) * CONFIG.itemsPerPage + 1;
+    const to = Math.min(currentPage * CONFIG.itemsPerPage, totalItems);
+
+    showingFrom.textContent = from;
+    showingTo.textContent = to;
+    totalRecords.textContent = totalItems;
+
+    paginationControls.innerHTML = '';
+
+    const prevBtn = createPaginationButton('‹', currentPage - 1, currentPage === 1);
+    paginationControls.appendChild(prevBtn);
+
+    const startPage = Math.max(1, currentPage - 2);
+    const endPage = Math.min(totalPages, currentPage + 2);
+
+    if (startPage > 1) {
+        paginationControls.appendChild(createPaginationButton('1', 1));
+        if (startPage > 2) {
+            paginationControls.appendChild(createPaginationButton('...', null, true));
+        }
+    }
+
+    for (let i = startPage; i <= endPage; i++) {
+        paginationControls.appendChild(createPaginationButton(i, i, false, i === currentPage));
+    }
+
+    if (endPage < totalPages) {
+        if (endPage < totalPages - 1) {
+            paginationControls.appendChild(createPaginationButton('...', null, true));
+        }
+        paginationControls.appendChild(createPaginationButton(totalPages, totalPages));
+    }
+
+    const nextBtn = createPaginationButton('›', currentPage + 1, currentPage === totalPages);
+    paginationControls.appendChild(nextBtn);
+
+    paginationContainer.style.display = 'flex';
+}
+
+function createPaginationButton(text, page, disabled = false, active = false) {
+    const button = document.createElement('button');
+    button.className = `pagination-btn ${active ? 'active' : ''}`;
+    button.textContent = text;
+    button.disabled = disabled;
+
+    if (!disabled && page !== null) {
+        button.onclick = () => goToPage(page);
+    }
+
+    return button;
+}
+
+// ============================================
+// DROPDOWN OPTIONS
+// ============================================
+async function loadPenanggungJawabOptions() {
+    try {
+        const response = await makeRequest('getPJList');
+        if (response.success) {
+            penanggungJawabOptions = response.data || [];
+            initializeSearchableSelect('penanggungJawab', penanggungJawabOptions);
+            initializeSearchableSelect('editPenanggungJawab', penanggungJawabOptions);
+        }
+    } catch (error) {
+        console.error('Error loading PJ options:', error);
+        penanggungJawabOptions = [];
+    }
+}
+
+async function loadKonsumsiOptions() {
+    try {
+        const response = await makeRequest('getKonsumsiList');
+        if (response.success) {
+            konsumsiOptions = response.data || [];
+            initializeSearchableSelect('konsumsi', konsumsiOptions);
+            initializeSearchableSelect('editKonsumsi', konsumsiOptions);
+        }
+    } catch (error) {
+        console.error('Error loading Konsumsi options:', error);
+        konsumsiOptions = ['Tidak ada', '1x Snack', '2x Snack', '1x Snack + Makan Siang', '2x Snack + Makan Siang'];
+        initializeSearchableSelect('konsumsi', konsumsiOptions);
+        initializeSearchableSelect('editKonsumsi', konsumsiOptions);
+    }
+}
+
+function initializeSearchableSelect(inputId, options) {
+    const container = document.getElementById(inputId + 'Container');
+    const input = document.getElementById(inputId);
+    const dropdown = document.getElementById(inputId + 'Dropdown');
+
+    if (!container || !input || !dropdown) return;
+
+    let highlightedIndex = -1;
+    let filteredOptions = [...options];
+
+    function populateDropdown(optionsToShow) {
+        dropdown.innerHTML = '';
+        if (optionsToShow.length === 0) {
+            dropdown.innerHTML = '<div class="no-options">Tidak ada pilihan yang cocok</div>';
+            return;
+        }
+        optionsToShow.forEach((option, index) => {
+            const optionDiv = document.createElement('div');
+            optionDiv.className = 'searchable-option';
+            optionDiv.textContent = option;
+            optionDiv.setAttribute('data-value', option);
+            optionDiv.setAttribute('data-index', index);
+            optionDiv.addEventListener('click', () => selectOption(option));
+            dropdown.appendChild(optionDiv);
+        });
+    }
+
+    function filterOptions(query) {
+        filteredOptions = !query.trim() ? [...options] : options.filter(option =>
+            option.toLowerCase().includes(query.toLowerCase())
+        );
+        populateDropdown(filteredOptions);
+        highlightedIndex = -1;
+    }
+
+    function selectOption(value) {
+        input.value = value;
+        input.classList.add('has-value');
+        hideDropdown();
+        input.dispatchEvent(new Event('change'));
+    }
+
+    function showDropdown() {
+        dropdown.classList.add('show');
+        container.classList.add('active');
+        filterOptions(input.value);
+    }
+
+    function hideDropdown() {
+        dropdown.classList.remove('show');
+        container.classList.remove('active');
+        highlightedIndex = -1;
+    }
+
+    function highlightOption(index) {
+        const options = dropdown.querySelectorAll('.searchable-option');
+        options.forEach(opt => opt.classList.remove('highlighted'));
+        if (index >= 0 && index < options.length) {
+            options[index].classList.add('highlighted');
+            highlightedIndex = index;
+        }
+    }
+
+    input.addEventListener('focus', showDropdown);
+    input.addEventListener('input', (e) => {
+        e.target.value.trim() ? input.classList.add('has-value') : input.classList.remove('has-value');
+        filterOptions(e.target.value);
+        showDropdown();
+    });
+
+    input.addEventListener('keydown', (e) => {
+        const optionElements = dropdown.querySelectorAll('.searchable-option:not(.no-options)');
+        switch (e.key) {
+            case 'ArrowDown':
+                e.preventDefault();
+                if (highlightedIndex < optionElements.length - 1) highlightOption(highlightedIndex + 1);
+                break;
+            case 'ArrowUp':
+                e.preventDefault();
+                if (highlightedIndex > 0) highlightOption(highlightedIndex - 1);
+                break;
+            case 'Enter':
+                e.preventDefault();
+                if (highlightedIndex >= 0 && optionElements[highlightedIndex]) {
+                    selectOption(optionElements[highlightedIndex].getAttribute('data-value'));
                 }
-            }
+                break;
+            case 'Escape':
+                hideDropdown();
+                break;
+        }
+    });
+
+    document.addEventListener('click', (e) => {
+        if (!container.contains(e.target)) hideDropdown();
+    });
+
+    populateDropdown(options);
+}
+
+// ============================================
+// FORM SUBMISSION WITH CACHE INVALIDATION
+// ============================================
+document.getElementById('addSubmitBtn').addEventListener('click', async function (e) {
+    e.preventDefault();
+    if (isSubmitting) return;
+    const form = document.getElementById('addForm');
+    if (!form.checkValidity()) {
+        form.reportValidity();
+        return;
+    }
+    await submitAddForm();
+});
+
+document.getElementById('addForm').addEventListener('submit', async function (e) {
+    e.preventDefault();
+    if (isSubmitting) return;
+    await submitAddForm();
+});
+
+async function submitAddForm() {
+    if (isSubmitting) return;
+    isSubmitting = true;
+
+    const submitBtn = document.getElementById('addSubmitBtn');
+    submitBtn.disabled = true;
+    submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Menyimpan...';
+
+    try {
+        const formData = getFormData('add');
+        const errors = validateBookingForm(formData);
+
+        if (Object.keys(errors).length > 0) {
+            showNotification('Validation Error: ' + Object.values(errors).join(', '), 'error');
+            return;
         }
 
-        function showTableLoadingState(show) {
-            const loadingState = document.getElementById('tableLoadingState');
-            loadingState.classList.toggle('show', show);
+        const hasConflict = await checkTimeConflict(formData.tanggal, formData.jamMulai, formData.jamSelesai);
+        if (hasConflict) {
+            showNotification('Terdapat konflik waktu dengan reservasi lain', 'error');
+            return;
         }
 
-        function showTable(show) {
-            const tableWrapper = document.getElementById('tableWrapper');
-            tableWrapper.style.display = show ? 'block' : 'none';
+        const response = await makeRequest('createBooking', formData);
+
+        if (response.success) {
+            showNotification('Reservasi berhasil ditambahkan!', 'success');
+            closeAddModal();
+            
+            lastDataLoadTime = 0;
+            await loadAllBookings(true, true);
+            await loadStatistics();
+            
+            currentPage = 1;
+            renderCurrentPage();
+        } else {
+            throw new Error(response.message || 'Gagal menyimpan data');
+        }
+    } catch (error) {
+        console.error('Error submitting form:', error);
+        showNotification('Gagal menyimpan: ' + error.message, 'error');
+    } finally {
+        submitBtn.disabled = false;
+        submitBtn.innerHTML = '<i class="fas fa-save"></i> Simpan Reservasi';
+        isSubmitting = false;
+    }
+}
+
+document.getElementById('editForm').addEventListener('submit', async function (e) {
+    e.preventDefault();
+    if (isSubmitting) return;
+    isSubmitting = true;
+
+    const submitBtn = document.getElementById('editSubmitBtn');
+    submitBtn.disabled = true;
+    submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Menyimpan...';
+
+    try {
+        const formData = getFormData('edit');
+        formData.id = currentEditId;
+
+        const errors = validateBookingForm(formData);
+        if (Object.keys(errors).length > 0) {
+            showNotification('Validation Error: ' + Object.values(errors).join(', '), 'error');
+            return;
         }
 
-        async function loadStatistics() {
-            try {
-                const response = await makeRequest('getStatistics');
-
-                if (response.success) {
-                    const stats = response.data;
-                    updateStatistics(stats);
-                } else {
-                    throw new Error(response.message || 'Gagal memuat statistik');
-                }
-            } catch (error) {
-                console.error('Error loading statistics:', error);
-                // Set default values on error
-                updateStatistics({
-                    total: 0,
-                    today: 0,
-                    ongoing: 0,
-                    upcoming: 0
-                });
-            }
+        const hasConflict = await checkTimeConflict(formData.tanggal, formData.jamMulai, formData.jamSelesai, currentEditId);
+        if (hasConflict) {
+            showNotification('Terdapat konflik waktu dengan reservasi lain', 'error');
+            return;
         }
 
-        // API Request Function
-        async function makeRequest(action, data = {}, retries = CONFIG.maxRetries) {
-            const formData = new FormData();
-            formData.append('action', action);
+        const response = await makeRequest('updateBooking', formData);
 
-            for (const key in data) {
-                formData.append(key, data[key]);
-            }
-
-            try {
-                const response = await fetch(CONFIG.scriptURL, {
-                    method: 'POST',
-                    body: formData
-                });
-
-                if (!response.ok) {
-                    throw new Error(`HTTP error! status: ${response.status}`);
-                }
-
-                const result = await response.json();
-                return result;
-            } catch (error) {
-                if (retries > 0) {
-                    console.log(`Request failed, retrying... (${retries} attempts left)`);
-                    await new Promise(resolve => setTimeout(resolve, CONFIG.retryDelay));
-                    return makeRequest(action, data, retries - 1);
-                }
-                throw error;
-            }
+        if (response.success) {
+            showNotification('Reservasi berhasil diperbarui!', 'success');
+            closeEditModal();
+            
+            lastDataLoadTime = 0;
+            await loadAllBookings(true, true);
+            await loadStatistics();
+            renderCurrentPage();
+        } else {
+            throw new Error(response.message || 'Gagal memperbarui data');
         }
+    } catch (error) {
+        console.error('Error updating booking:', error);
+        showNotification('Gagal memperbarui: ' + error.message, 'error');
+    } finally {
+        submitBtn.disabled = false;
+        submitBtn.innerHTML = '<i class="fas fa-save"></i> Simpan Perubahan';
+        isSubmitting = false;
+    }
+});
 
-        // Render Functions
-        function renderBookingsTable() {
-            const tbody = document.getElementById('bookingTableBody');
-            tbody.innerHTML = '';
+async function confirmDelete() {
+    if (!currentDeleteId || isSubmitting) return;
+    isSubmitting = true;
 
-            if (bookingsData.length === 0) {
-                return;
+    const submitBtn = document.getElementById('deleteConfirmBtn');
+    submitBtn.disabled = true;
+    submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Menghapus...';
+
+    try {
+        const response = await makeRequest('deleteBooking', { id: currentDeleteId });
+
+        if (response.success) {
+            showNotification('Reservasi berhasil dihapus!', 'success');
+            closeDeleteModal();
+
+            lastDataLoadTime = 0;
+            await loadAllBookings(true, true);
+            await loadStatistics();
+
+            if (filteredBookingsData.length === 0 && currentPage > 1) {
+                currentPage--;
             }
+            renderCurrentPage();
+        } else {
+            throw new Error(response.message || 'Gagal menghapus data');
+        }
+    } catch (error) {
+        console.error('Error deleting booking:', error);
+        showNotification('Gagal menghapus: ' + error.message, 'error');
+    } finally {
+        submitBtn.disabled = false;
+        submitBtn.innerHTML = '<i class="fas fa-trash"></i> Hapus';
+        isSubmitting = false;
+    }
+}
 
-            bookingsData.forEach((booking, index) => {
-                const globalIndex = (currentPage - 1) * CONFIG.itemsPerPage + index + 1;
-                const status = calculateStatus(booking.tanggal, booking.jam_mulai, booking.jam_selesai);
-                const row = createBookingRow(booking, globalIndex, status);
-                tbody.appendChild(row);
-            });
+function validateBookingForm(formData) {
+    const errors = {};
+    if (!formData.tanggal) errors.tanggal = 'Tanggal harus diisi';
+    if (!formData.kegiatan) errors.kegiatan = 'Kegiatan harus diisi';
+    if (!formData.penanggungJawab) errors.penanggungJawab = 'Penanggung jawab harus diisi';
+    if (!formData.peserta || formData.peserta < 1) errors.peserta = 'Peserta minimal 1 orang';
+    if (!formData.konsumsi) errors.konsumsi = 'Konsumsi harus diisi';
+    if (!formData.jamMulai) errors.jamMulai = 'Jam mulai harus diisi';
+    if (!formData.jamSelesai) errors.jamSelesai = 'Jam selesai harus diisi';
 
-            // Animate table rows
+    const today = new Date().toISOString().split('T')[0];
+    if (formData.tanggal < today) {
+        errors.tanggal = 'Tanggal tidak boleh kurang dari hari ini';
+    }
+
+    if (formData.jamMulai && formData.jamSelesai && formData.jamSelesai <= formData.jamMulai) {
+        errors.jamSelesai = 'Jam selesai harus lebih besar dari jam mulai';
+    }
+
+    return errors;
+}
+
+async function checkTimeConflict(tanggal, jamMulai, jamSelesai, excludeId = null) {
+    try {
+        const response = await makeRequest('checkConflict', {
+            tanggal: tanggal,
+            jam_mulai: jamMulai,
+            jam_selesai: jamSelesai,
+            exclude_id: excludeId
+        });
+        return response.has_conflict;
+    } catch (error) {
+        console.error('Error checking conflict:', error);
+        return false;
+    }
+}
+
+function getFormData(prefix) {
+    const elementIds = prefix === 'add' ? {
+        tanggal: 'tanggal',
+        kegiatan: 'kegiatan',
+        penanggungJawab: 'penanggungJawab',
+        peserta: 'peserta',
+        konsumsi: 'konsumsi',
+        jamMulaiHour: 'jamMulaiHour',
+        jamMulaiMinute: 'jamMulaiMinute',
+        jamSelesaiHour: 'jamSelesaiHour',
+        jamSelesaiMinute: 'jamSelesaiMinute'
+    } : {
+        tanggal: 'editTanggal',
+        kegiatan: 'editKegiatan',
+        penanggungJawab: 'editPenanggungJawab',
+        peserta: 'editPeserta',
+        konsumsi: 'editKonsumsi',
+        jamMulaiHour: 'editJamMulaiHour',
+        jamMulaiMinute: 'editJamMulaiMinute',
+        jamSelesaiHour: 'editJamSelesaiHour',
+        jamSelesaiMinute: 'editJamSelesaiMinute'
+    };
+
+    const jamMulaiHour = (document.getElementById(elementIds.jamMulaiHour).value || '0').padStart(2, '0');
+    const jamMulaiMinute = (document.getElementById(elementIds.jamMulaiMinute).value || '0').padStart(2, '0');
+    const jamSelesaiHour = (document.getElementById(elementIds.jamSelesaiHour).value || '0').padStart(2, '0');
+    const jamSelesaiMinute = (document.getElementById(elementIds.jamSelesaiMinute).value || '0').padStart(2, '0');
+
+    return {
+        tanggal: document.getElementById(elementIds.tanggal).value,
+        kegiatan: document.getElementById(elementIds.kegiatan).value.trim(),
+        penanggungJawab: document.getElementById(elementIds.penanggungJawab).value,
+        peserta: parseInt(document.getElementById(elementIds.peserta).value) || 0,
+        konsumsi: document.getElementById(elementIds.konsumsi).value,
+        jamMulai: `${jamMulaiHour}:${jamMulaiMinute}`,
+        jamSelesai: `${jamSelesaiHour}:${jamSelesaiMinute}`
+    };
+}
+
+// ============================================
+// MODAL FUNCTIONS
+// ============================================
+function openAddModal() {
+    stopAutoRefresh();
+    const modal = document.getElementById('addModal');
+    modal.classList.add('show');
+    resetAddForm();
+    document.getElementById('tanggal').value = new Date().toISOString().split('T')[0];
+
+    anime({
+        targets: '.modal',
+        scale: [0.7, 1],
+        opacity: [0, 1],
+        duration: 300,
+        easing: 'easeOutQuad'
+    });
+}
+
+function closeAddModal() {
+    document.getElementById('addModal').classList.remove('show');
+    resetAddForm();
+    startAutoRefresh();
+}
+
+function openEditModal(id) {
+    stopAutoRefresh();
+    const booking = allBookingsData.find(b => Number(b.id) === Number(id));
+    if (!booking) {
+        showNotification('Data tidak ditemukan!', 'error');
+        return;
+    }
+
+    currentEditId = id;
+    const modal = document.getElementById('editModal');
+    modal.classList.add('show');
+
+    document.getElementById('editId').value = booking.id;
+    document.getElementById('editTanggal').value = booking.tanggal;
+    document.getElementById('editKegiatan').value = booking.kegiatan;
+
+    const pjInput = document.getElementById('editPenanggungJawab');
+    pjInput.value = booking.penanggung_jawab;
+    pjInput.classList.add('has-value');
+
+    document.getElementById('editPeserta').value = booking.peserta;
+
+    const konsumsiInput = document.getElementById('editKonsumsi');
+    konsumsiInput.value = booking.konsumsi;
+    konsumsiInput.classList.add('has-value');
+
+    const jamMulai = booking.jam_mulai.split(':');
+    const jamSelesai = booking.jam_selesai.split(':');
+
+    document.getElementById('editJamMulaiHour').value = jamMulai[0];
+    document.getElementById('editJamMulaiMinute').value = jamMulai[1];
+    document.getElementById('editJamSelesaiHour').value = jamSelesai[0];
+    document.getElementById('editJamSelesaiMinute').value = jamSelesai[1];
+
+    anime({
+        targets: '.modal',
+        scale: [0.7, 1],
+        opacity: [0, 1],
+        duration: 300,
+        easing: 'easeOutQuad'
+    });
+}
+
+function closeEditModal() {
+    document.getElementById('editModal').classList.remove('show');
+    currentEditId = null;
+    startAutoRefresh();
+}
+
+function openDeleteModal(id) {
+    stopAutoRefresh();
+    const booking = allBookingsData.find(b => Number(b.id) === Number(id));
+    if (!booking) {
+        showNotification('Data tidak ditemukan!', 'error');
+        return;
+    }
+
+    currentDeleteId = id;
+    const modal = document.getElementById('deleteModal');
+    modal.classList.add('show');
+
+    document.getElementById('deleteDetails').innerHTML = `
+        <h4 style="margin: 0 0 0.5rem 0; color: var(--gray-900);">${booking.kegiatan}</h4>
+        <p style="margin: 0.25rem 0; color: var(--gray-600);"><i class="fas fa-calendar"></i> ${formatDate(booking.tanggal)}</p>
+        <p style="margin: 0.25rem 0; color: var(--gray-600);"><i class="fas fa-user"></i> ${booking.penanggung_jawab}</p>
+        <p style="margin: 0.25rem 0; color: var(--gray-600);"><i class="fas fa-clock"></i> ${booking.jam_mulai} - ${booking.jam_selesai}</p>
+    `;
+
+    anime({
+        targets: '.modal',
+        scale: [0.7, 1],
+        opacity: [0, 1],
+        duration: 300,
+        easing: 'easeOutQuad'
+    });
+}
+
+function closeDeleteModal() {
+    document.getElementById('deleteModal').classList.remove('show');
+    currentDeleteId = null;
+    startAutoRefresh();
+}
+
+function resetAddForm() {
+    document.getElementById('addForm').reset();
+    document.getElementById('penanggungJawab').classList.remove('has-value');
+    document.getElementById('konsumsi').classList.remove('has-value');
+    document.querySelectorAll('.searchable-dropdown').forEach(d => d.classList.remove('show'));
+    document.querySelectorAll('.searchable-select').forEach(c => c.classList.remove('active'));
+}
+
+// ============================================
+// UTILITIES
+// ============================================
+async function loadStatistics() {
+    try {
+        const response = await makeRequest('getStatistics');
+        if (response.success) {
+            updateStatistics(response.data);
+        }
+    } catch (error) {
+        console.error('Error loading statistics:', error);
+        updateStatistics({ total: 0, today: 0, ongoing: 0, upcoming: 0 });
+    }
+}
+
+function updateStatistics(stats) {
+    const targets = [
+        { element: document.getElementById('totalBookings'), value: stats.total || 0 },
+        { element: document.getElementById('todayBookings'), value: stats.today || 0 },
+        { element: document.getElementById('ongoingBookings'), value: stats.ongoing || 0 },
+        { element: document.getElementById('upcomingBookings'), value: stats.upcoming || 0 },
+        { element: document.getElementById('totalBookingsMobile'), value: stats.total || 0 },
+        { element: document.getElementById('todayBookingsMobile'), value: stats.today || 0 },
+        { element: document.getElementById('ongoingBookingsMobile'), value: stats.ongoing || 0 },
+        { element: document.getElementById('upcomingBookingsMobile'), value: stats.upcoming || 0 }
+    ];
+
+    targets.forEach(target => {
+        if (target.element) {
             anime({
-                targets: 'tbody tr',
-                translateX: [-20, 0],
-                opacity: [0, 1],
-                duration: 400,
-                delay: anime.stagger(50),
-                easing: 'easeOutQuad'
+                targets: target.element,
+                innerHTML: [0, target.value],
+                duration: 1000,
+                easing: 'easeOutQuad',
+                round: 1
             });
         }
+    });
+}
 
-        function createBookingRow(booking, index, status) {
-            const row = document.createElement('tr');
+async function makeRequest(action, data = {}, retries = CONFIG.maxRetries) {
+    const formData = new FormData();
+    formData.append('action', action);
+    for (const key in data) {
+        formData.append(key, data[key]);
+    }
 
-            const statusClass = getStatusClass(status);
-            const statusIcon = getStatusIcon(status);
-            const statusText = getStatusText(status);
+    try {
+        const response = await fetch(CONFIG.scriptURL, {
+            method: 'POST',
+            body: formData
+        });
 
-            // Format tanggal
-            const formattedDate = formatDate(booking.tanggal);
-
-            // Generate WhatsApp message
-            const whatsappMessage = generateWhatsAppMessage(booking);
-            const whatsappURL = `https://wa.me/?text=${encodeURIComponent(whatsappMessage)}`;
-
-            // FIXED: Use integer IDs (no quotes needed for numbers)
-            row.innerHTML = `
-                <td>${index}</td>
-                <td>${formattedDate}</td>
-                <td>${booking.kegiatan}</td>
-                <td>${booking.penanggung_jawab}</td>
-                <td style="text-align: center;">${booking.peserta}</td>
-                <td>${booking.konsumsi}</td>
-                <td style="text-align: center;">${booking.jam_mulai}</td>
-                <td style="text-align: center;">${booking.jam_selesai}</td>
-                <td style="text-align: center;">
-                    <span class="status-item ${statusClass}">
-                        <i class="${statusIcon}"></i>${statusText}
-                    </span>
-                </td>
-                <td>
-                    <div class="action-buttons">
-                        <button onclick="openEditModal(${booking.id})" class="btn-sm btn-edit" title="Edit">
-                            <i class="fas fa-edit"></i>
-                        </button>
-                        <button onclick="openDeleteModal(${booking.id})" class="btn-sm btn-delete" title="Hapus">
-                            <i class="fas fa-trash"></i>
-                        </button>
-                        <a href="${whatsappURL}" target="_blank" class="btn-sm btn-whatsapp" title="Kirim via WhatsApp">
-                            <i class="fab fa-whatsapp"></i>
-                        </a>
-                    </div>
-                </td>
-            `;
-
-            return row;
+        if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
         }
 
-        function renderPagination() {
-            const paginationContainer = document.getElementById('paginationContainer');
-            const paginationControls = document.getElementById('paginationControls');
-            const showingFrom = document.getElementById('showingFrom');
-            const showingTo = document.getElementById('showingTo');
-            const totalRecords = document.getElementById('totalRecords');
-
-            if (totalItems === 0) {
-                paginationContainer.style.display = 'none';
-                return;
-            }
-
-            // Update pagination info
-            const from = (currentPage - 1) * CONFIG.itemsPerPage + 1;
-            const to = Math.min(currentPage * CONFIG.itemsPerPage, totalItems);
-
-            showingFrom.textContent = from;
-            showingTo.textContent = to;
-            totalRecords.textContent = totalItems;
-
-            // Generate pagination buttons
-            paginationControls.innerHTML = '';
-
-            // Previous button
-            const prevBtn = createPaginationButton('‹', currentPage - 1, currentPage === 1);
-            paginationControls.appendChild(prevBtn);
-
-            // Page numbers
-            const startPage = Math.max(1, currentPage - 2);
-            const endPage = Math.min(totalPages, currentPage + 2);
-
-            if (startPage > 1) {
-                paginationControls.appendChild(createPaginationButton('1', 1));
-                if (startPage > 2) {
-                    paginationControls.appendChild(createPaginationButton('...', null, true));
-                }
-            }
-
-            for (let i = startPage; i <= endPage; i++) {
-                paginationControls.appendChild(createPaginationButton(i, i, false, i === currentPage));
-            }
-
-            if (endPage < totalPages) {
-                if (endPage < totalPages - 1) {
-                    paginationControls.appendChild(createPaginationButton('...', null, true));
-                }
-                paginationControls.appendChild(createPaginationButton(totalPages, totalPages));
-            }
-
-            // Next button
-            const nextBtn = createPaginationButton('›', currentPage + 1, currentPage === totalPages);
-            paginationControls.appendChild(nextBtn);
-
-            paginationContainer.style.display = 'flex';
+        return await response.json();
+    } catch (error) {
+        if (retries > 0) {
+            console.log(`Request failed, retrying... (${retries} attempts left)`);
+            await new Promise(resolve => setTimeout(resolve, CONFIG.retryDelay));
+            return makeRequest(action, data, retries - 1);
         }
+        throw error;
+    }
+}
 
-        function createPaginationButton(text, page, disabled = false, active = false) {
-            const button = document.createElement('button');
-            button.className = `pagination-btn ${active ? 'active' : ''}`;
-            button.textContent = text;
-            button.disabled = disabled;
+function updateCurrentDateTime() {
+    const now = new Date();
+    const formatter = new Intl.DateTimeFormat('id-ID', {
+        weekday: 'long',
+        year: 'numeric',
+        month: 'long',
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        timeZone: 'Asia/Jakarta'
+    });
+    document.getElementById('currentDateTime').textContent = formatter.format(now);
+}
 
-            if (!disabled && page !== null) {
-                button.onclick = () => goToPage(page);
-            }
+function formatDate(dateString) {
+    const date = new Date(dateString);
+    return date.toLocaleDateString('id-ID', {
+        weekday: 'short',
+        day: '2-digit',
+        month: 'short',
+        year: 'numeric'
+    });
+}
 
-            return button;
-        }
-
-        // Helper Functions
-        function getStatusClass(status) {
-            switch (status) {
-                case 'berlangsung': return 'status-berlangsung';
-                case 'selesai': return 'status-selesai';
-                case 'belum-mulai': return 'status-belum-mulai';
-                default: return 'status-belum-mulai';
-            }
-        }
-
-        function getStatusIcon(status) {
-            switch (status) {
-                case 'berlangsung': return 'fas fa-play';
-                case 'selesai': return 'fas fa-check';
-                case 'belum-mulai': return 'fas fa-clock';
-                default: return 'fas fa-clock';
-            }
-        }
-
-        function getStatusText(status) {
-            switch (status) {
-                case 'berlangsung': return 'Berlangsung';
-                case 'selesai': return 'Selesai';
-                case 'belum-mulai': return 'Belum Mulai';
-                default: return 'Belum Mulai';
-            }
-        }
-
-        function formatDate(dateString) {
-            const date = new Date(dateString);
-            const options = {
-                weekday: 'short',
-                day: '2-digit',
-                month: 'short',
-                year: 'numeric'
-            };
-            return date.toLocaleDateString('id-ID', options);
-        }
-
-        function generateWhatsAppMessage(booking) {
-            const formattedDate = formatDate(booking.tanggal);
-            return `*RESERVASI AULA BPS KOTA TANJUNGPINANG*
+function generateWhatsAppMessage(booking) {
+    const formattedDate = formatDate(booking.tanggal);
+    return `*RESERVASI AULA BPS KOTA TANJUNGPINANG*
 
 Tanggal: ${formattedDate}
 Kegiatan: ${booking.kegiatan}
@@ -2071,644 +2339,211 @@ Konsumsi: ${booking.konsumsi}
 Waktu: ${booking.jam_mulai} - ${booking.jam_selesai}
 
 Pesan ini dikirim dari Sistem Reservasi Aula BPS`;
-        }
+}
 
-        function updateStatistics(stats) {
-            // Animate stats update for both desktop and mobile
-            const targets = [
-                // Desktop version
-                { element: document.getElementById('totalBookings'), value: stats.total || 0 },
-                { element: document.getElementById('todayBookings'), value: stats.today || 0 },
-                { element: document.getElementById('ongoingBookings'), value: stats.ongoing || 0 },
-                { element: document.getElementById('upcomingBookings'), value: stats.upcoming || 0 },
-                // Mobile compact version
-                { element: document.getElementById('totalBookingsMobile'), value: stats.total || 0 },
-                { element: document.getElementById('todayBookingsMobile'), value: stats.today || 0 },
-                { element: document.getElementById('ongoingBookingsMobile'), value: stats.ongoing || 0 },
-                { element: document.getElementById('upcomingBookingsMobile'), value: stats.upcoming || 0 }
-            ];
+function getStatusClass(status) {
+    switch (status) {
+        case 'berlangsung': return 'status-berlangsung';
+        case 'selesai': return 'status-selesai';
+        default: return 'status-belum-mulai';
+    }
+}
 
-            targets.forEach(target => {
-                if (target.element) {
-                    anime({
-                        targets: target.element,
-                        innerHTML: [0, target.value],
-                        duration: 1000,
-                        easing: 'easeOutQuad',
-                        round: 1
-                    });
-                }
-            });
-        }
+function getStatusIcon(status) {
+    switch (status) {
+        case 'berlangsung': return 'fas fa-play';
+        case 'selesai': return 'fas fa-check';
+        default: return 'fas fa-clock';
+    }
+}
 
-        function showLoadingOverlay(show) {
-            const overlay = document.getElementById('loadingOverlay');
-            overlay.classList.toggle('show', show);
-        }
+function getStatusText(status) {
+    switch (status) {
+        case 'berlangsung': return 'Berlangsung';
+        case 'selesai': return 'Selesai';
+        default: return 'Belum Mulai';
+    }
+}
 
-        function showEmptyState(show) {
-            const emptyState = document.getElementById('emptyState');
-            const tableWrapper = document.querySelector('.table-wrapper');
+function showLoadingOverlay(show) {
+    document.getElementById('loadingOverlay').classList.toggle('show', show);
+}
 
-            emptyState.style.display = show ? 'block' : 'none';
-            tableWrapper.style.display = show ? 'none' : 'block';
-        }
+function showTableLoadingState(show) {
+    document.getElementById('tableLoadingState').classList.toggle('show', show);
+}
 
-        function goToPage(page) {
-            if (page < 1 || page > totalPages || page === currentPage) return;
-            loadBookings(page, true);
-        }
+function showTable(show) {
+    document.getElementById('tableWrapper').style.display = show ? 'block' : 'none';
+}
 
-        // FIXED: Show immediate loading for add button
-        function showAddButtonLoading(show) {
-            const btn = document.getElementById('addReservationBtn');
-            const btnText = document.getElementById('addBtnText');
-            const icon = btn.querySelector('i');
+function showEmptyState(show) {
+    document.getElementById('emptyState').style.display = show ? 'block' : 'none';
+    document.querySelector('.table-wrapper').style.display = show ? 'none' : 'block';
+}
 
-            if (show) {
-                btn.disabled = true;
-                icon.className = 'fas fa-spinner fa-spin';
-                btnText.textContent = 'Menambahkan...';
-            } else {
-                btn.disabled = false;
-                icon.className = 'fas fa-plus';
-                btnText.textContent = 'Tambah Reservasi';
-            }
-        }
+function showNotification(message, type) {
+    document.querySelectorAll('.notification').forEach(n => n.remove());
 
-        // Modal Functions
-        function openAddModal() {
-            stopAutoRefresh(); // Stop auto refresh when modal is open
+    const notification = document.createElement('div');
+    notification.className = `notification ${type}`;
+    notification.textContent = message;
+    document.body.appendChild(notification);
 
-            // FIXED: Show loading immediately when button is clicked
-            showAddButtonLoading(true);
+    anime({
+        targets: notification,
+        translateX: [300, 0],
+        opacity: [0, 1],
+        duration: 300,
+        easing: 'easeOutQuad'
+    });
 
-            const modal = document.getElementById('addModal');
-            modal.classList.add('show');
-            resetAddForm();
-
-            // Set default date to today
-            document.getElementById('tanggal').value = new Date().toISOString().split('T')[0];
-
-            // NO NEED to reload options - already cached in memory from startup
-            // Just populate dropdowns from cached data
-            if (penanggungJawabOptions.length === 0) {
-                console.warn('PJ options not loaded, loading now...');
-                loadPenanggungJawabOptions();
-            }
-            if (konsumsiOptions.length === 0) {
-                console.warn('Konsumsi options not loaded, loading now...');
-                loadKonsumsiOptions();
-            }
-
-            // Reset loading state after modal is shown
-            setTimeout(() => {
-                showAddButtonLoading(false);
-            }, 500);
-
-            // Animate modal
-            anime({
-                targets: '.modal',
-                scale: [0.7, 1],
-                opacity: [0, 1],
-                duration: 300,
-                easing: 'easeOutQuad'
-            });
-        }
-
-        function closeAddModal() {
-            const modal = document.getElementById('addModal');
-            modal.classList.remove('show');
-            resetAddForm();
-            showAddButtonLoading(false); // Reset loading state
-            startAutoRefresh(); // Restart auto refresh
-        }
-
-        function openEditModal(id) {
-            console.log('openEditModal called with id:', id);
-            stopAutoRefresh(); // Stop auto refresh when modal is open
-
-            // FIXED: Use number comparison for integer IDs
-            const booking = bookingsData.find(b => Number(b.id) === Number(id));
-            if (!booking) {
-                console.error('Booking not found with id:', id);
-                console.log('Available bookings:', bookingsData.map(b => ({ id: b.id, kegiatan: b.kegiatan })));
-                showNotification('Data tidak ditemukan!', 'error');
-                return;
-            }
-
-            console.log('Found booking:', booking);
-            currentEditId = id;
-            const modal = document.getElementById('editModal');
-            modal.classList.add('show');
-
-            // Populate form
-            document.getElementById('editId').value = booking.id;
-            document.getElementById('editTanggal').value = booking.tanggal;
-            document.getElementById('editKegiatan').value = booking.kegiatan;
-
-            // Set searchable select values
-            const pjInput = document.getElementById('editPenanggungJawab');
-            pjInput.value = booking.penanggung_jawab;
-            pjInput.classList.add('has-value');
-
-            document.getElementById('editPeserta').value = booking.peserta;
-
-            const konsumsiInput = document.getElementById('editKonsumsi');
-            konsumsiInput.value = booking.konsumsi;
-            konsumsiInput.classList.add('has-value');
-
-            // Parse time
-            const jamMulai = booking.jam_mulai.split(':');
-            const jamSelesai = booking.jam_selesai.split(':');
-
-            document.getElementById('editJamMulaiHour').value = jamMulai[0];
-            document.getElementById('editJamMulaiMinute').value = jamMulai[1];
-            document.getElementById('editJamSelesaiHour').value = jamSelesai[0];
-            document.getElementById('editJamSelesaiMinute').value = jamSelesai[1];
-
-            // Animate modal
-            anime({
-                targets: '.modal',
-                scale: [0.7, 1],
-                opacity: [0, 1],
-                duration: 300,
-                easing: 'easeOutQuad'
-            });
-        }
-
-        function closeEditModal() {
-            const modal = document.getElementById('editModal');
-            modal.classList.remove('show');
-            currentEditId = null;
-            startAutoRefresh(); // Restart auto refresh
-        }
-
-        function openDeleteModal(id) {
-            console.log('openDeleteModal called with id:', id);
-            stopAutoRefresh(); // Stop auto refresh when modal is open
-
-            // FIXED: Use number comparison for integer IDs
-            const booking = bookingsData.find(b => Number(b.id) === Number(id));
-            if (!booking) {
-                console.error('Booking not found with id:', id);
-                console.log('Available bookings:', bookingsData.map(b => ({ id: b.id, kegiatan: b.kegiatan })));
-                showNotification('Data tidak ditemukan!', 'error');
-                return;
-            }
-
-            console.log('Found booking for delete:', booking);
-            currentDeleteId = id;
-            const modal = document.getElementById('deleteModal');
-            modal.classList.add('show');
-
-            // Populate delete details
-            const deleteDetails = document.getElementById('deleteDetails');
-            deleteDetails.innerHTML = `
-                <h4 style="margin: 0 0 0.5rem 0; color: var(--gray-900);">${booking.kegiatan}</h4>
-                <p style="margin: 0.25rem 0; color: var(--gray-600);"><i class="fas fa-calendar"></i> ${formatDate(booking.tanggal)}</p>
-                <p style="margin: 0.25rem 0; color: var(--gray-600);"><i class="fas fa-user"></i> ${booking.penanggung_jawab}</p>
-                <p style="margin: 0.25rem 0; color: var(--gray-600);"><i class="fas fa-clock"></i> ${booking.jam_mulai} - ${booking.jam_selesai}</p>
-            `;
-
-            // Animate modal
-            anime({
-                targets: '.modal',
-                scale: [0.7, 1],
-                opacity: [0, 1],
-                duration: 300,
-                easing: 'easeOutQuad'
-            });
-        }
-
-        function closeDeleteModal() {
-            const modal = document.getElementById('deleteModal');
-            modal.classList.remove('show');
-            currentDeleteId = null;
-            startAutoRefresh(); // Restart auto refresh
-        }
-
-        // Form Functions
-        function resetAddForm() {
-            document.getElementById('addForm').reset();
-        }
-
-        // Form Validation
-        function validateBookingForm(formData) {
-            const errors = {};
-
-            // Basic validations
-            if (!formData.tanggal) errors.tanggal = 'Tanggal harus diisi';
-            if (!formData.kegiatan) errors.kegiatan = 'Kegiatan harus diisi';
-            if (!formData.penanggungJawab) errors.penanggungJawab = 'Penanggung jawab harus diisi';
-            if (!formData.peserta || formData.peserta < 1) errors.peserta = 'Peserta minimal 1 orang';
-            if (!formData.konsumsi) errors.konsumsi = 'Konsumsi harus diisi';
-            if (!formData.jamMulai) errors.jamMulai = 'Jam mulai harus diisi';
-            if (!formData.jamSelesai) errors.jamSelesai = 'Jam selesai harus diisi';
-
-            // Date validation
-            const today = new Date().toISOString().split('T')[0];
-            if (formData.tanggal < today) {
-                errors.tanggal = 'Tanggal tidak boleh kurang dari hari ini';
-            }
-
-            // Time validation
-            if (formData.jamMulai && formData.jamSelesai) {
-                if (formData.jamSelesai <= formData.jamMulai) {
-                    errors.jamSelesai = 'Jam selesai harus lebih besar dari jam mulai';
-                }
-            }
-
-            return errors;
-        }
-
-        async function checkTimeConflict(tanggal, jamMulai, jamSelesai, excludeId = null) {
-            try {
-                const response = await makeRequest('checkConflict', {
-                    tanggal: tanggal,
-                    jam_mulai: jamMulai,
-                    jam_selesai: jamSelesai,
-                    exclude_id: excludeId
-                });
-
-                return response.has_conflict;
-            } catch (error) {
-                console.error('Error checking conflict:', error);
-                return false; // Don't block submission on error
-            }
-        }
-
-        // Add Submit Button Click Handler (Primary)
-        document.getElementById('addSubmitBtn').addEventListener('click', async function (e) {
-            e.preventDefault();
-            console.log('Add submit button clicked'); // Debug log
-
-            // FIXED: Prevent double submissions
-            if (isSubmitting) {
-                console.log('Already submitting, ignoring click');
-                return;
-            }
-
-            // Validate required fields first
-            const form = document.getElementById('addForm');
-            if (!form.checkValidity()) {
-                form.reportValidity();
-                return;
-            }
-
-            await submitAddForm();
+    setTimeout(() => {
+        anime({
+            targets: notification,
+            translateX: [0, 300],
+            opacity: [1, 0],
+            duration: 300,
+            easing: 'easeInQuad',
+            complete: () => notification.remove()
         });
+    }, type === 'error' ? 7000 : 5000);
+}
 
-        // Form Submission (Secondary - for form enter key)
-        document.getElementById('addForm').addEventListener('submit', async function (e) {
-            e.preventDefault();
-            console.log('Add form submitted'); // Debug log
-
-            // FIXED: Prevent double submissions
-            if (isSubmitting) {
-                console.log('Already submitting, ignoring form submit');
-                return;
-            }
-
-            await submitAddForm();
-        });
-
-        // Dedicated function for add form submission
-        async function submitAddForm() {
-            console.log('submitAddForm called'); // Debug log
-
-            // FIXED: Set submitting flag
-            if (isSubmitting) {
-                console.log('Already submitting, aborting');
-                return;
-            }
-
-            isSubmitting = true;
-
-            // FIXED: Show loading IMMEDIATELY (seamless UX as requested)
-            const submitBtn = document.getElementById('addSubmitBtn');
-            submitBtn.disabled = true;
-            submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Menyimpan...';
-
-            try {
-                const formData = getFormData('add');
-                console.log('Form data:', formData); // Debug log
-
-                const errors = validateBookingForm(formData);
-                console.log('Validation errors:', errors); // Debug log
-
-                if (Object.keys(errors).length > 0) {
-                    const errorMessages = Object.values(errors).join('\n');
-                    showNotification('Validation Error:\n' + errorMessages, 'error');
-                    return;
-                }
-
-                // Check for conflicts
-                console.log('Checking conflicts...'); // Debug log
-                const hasConflict = await checkTimeConflict(formData.tanggal, formData.jamMulai, formData.jamSelesai);
-                if (hasConflict) {
-                    showNotification('Terdapat konflik waktu dengan reservasi lain pada tanggal dan jam tersebut', 'error');
-                    return;
-                }
-
-                console.log('Submitting to server...'); // Debug log
-                const response = await makeRequest('createBooking', formData);
-                console.log('Server response:', response); // Debug log
-
-                if (response.success) {
-                    showNotification('Reservasi berhasil ditambahkan!', 'success');
-                    closeAddModal();
-                    loadBookings(currentPage);
-                    loadStatistics();
-                } else {
-                    throw new Error(response.message || 'Gagal menyimpan data');
-                }
-            } catch (error) {
-                console.error('Error submitting form:', error);
-                showNotification('Gagal menyimpan: ' + error.message, 'error');
-            } finally {
-                submitBtn.disabled = false;
-                submitBtn.innerHTML = '<i class="fas fa-save"></i> Simpan Reservasi';
-                isSubmitting = false; // Reset submitting flag
-            }
+// ============================================
+// AUTO-REFRESH
+// ============================================
+function startAutoRefresh() {
+    if (autoRefreshTimer) clearInterval(autoRefreshTimer);
+    autoRefreshTimer = setInterval(async () => {
+        if (!isLoading && !isSubmitting) {
+            await loadAllBookings(false, false);
+            await loadStatistics();
         }
+    }, CONFIG.autoRefreshInterval);
+}
 
-        document.getElementById('editForm').addEventListener('submit', async function (e) {
-            e.preventDefault();
+function stopAutoRefresh() {
+    if (autoRefreshTimer) {
+        clearInterval(autoRefreshTimer);
+        autoRefreshTimer = null;
+    }
+}
 
-            // FIXED: Prevent double submissions for edit too
-            if (isSubmitting) return;
-            isSubmitting = true;
-
-            // FIXED: Show loading IMMEDIATELY for edit form too (seamless UX)
-            const submitBtn = document.getElementById('editSubmitBtn');
-            submitBtn.disabled = true;
-            submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Menyimpan...';
-
-            try {
-                const formData = getFormData('edit');
-                formData.id = currentEditId;
-
-                const errors = validateBookingForm(formData);
-
-                if (Object.keys(errors).length > 0) {
-                    const errorMessages = Object.values(errors).join('\n');
-                    showNotification('Validation Error:\n' + errorMessages, 'error');
-                    return;
-                }
-
-                // Check for conflicts (excluding current booking)
-                const hasConflict = await checkTimeConflict(formData.tanggal, formData.jamMulai, formData.jamSelesai, currentEditId);
-                if (hasConflict) {
-                    showNotification('Terdapat konflik waktu dengan reservasi lain pada tanggal dan jam tersebut', 'error');
-                    return;
-                }
-
-                const response = await makeRequest('updateBooking', formData);
-
-                if (response.success) {
-                    showNotification('Reservasi berhasil diperbarui!', 'success');
-                    closeEditModal();
-                    loadBookings(currentPage);
-                    loadStatistics();
-                } else {
-                    throw new Error(response.message || 'Gagal memperbarui data');
-                }
-            } catch (error) {
-                console.error('Error updating booking:', error);
-                showNotification('Gagal memperbarui: ' + error.message, 'error');
-            } finally {
-                submitBtn.disabled = false;
-                submitBtn.innerHTML = '<i class="fas fa-save"></i> Simpan Perubahan';
-                isSubmitting = false;
-            }
-        });
-
-        function getFormData(prefix) {
-            // FIXED: Use correct element IDs based on actual HTML structure
-            let elementIds;
-
-            if (prefix === 'add') {
-                elementIds = {
-                    tanggal: 'tanggal',
-                    kegiatan: 'kegiatan',
-                    penanggungJawab: 'penanggungJawab',
-                    peserta: 'peserta',
-                    konsumsi: 'konsumsi',
-                    jamMulaiHour: 'jamMulaiHour',
-                    jamMulaiMinute: 'jamMulaiMinute',
-                    jamSelesaiHour: 'jamSelesaiHour',
-                    jamSelesaiMinute: 'jamSelesaiMinute'
-                };
-            } else {
-                elementIds = {
-                    tanggal: 'editTanggal',
-                    kegiatan: 'editKegiatan',
-                    penanggungJawab: 'editPenanggungJawab',
-                    peserta: 'editPeserta',
-                    konsumsi: 'editKonsumsi',
-                    jamMulaiHour: 'editJamMulaiHour',
-                    jamMulaiMinute: 'editJamMulaiMinute',
-                    jamSelesaiHour: 'editJamSelesaiHour',
-                    jamSelesaiMinute: 'editJamSelesaiMinute'
-                };
-            }
-
-            // Get elements using correct IDs
-            const tanggalEl = document.getElementById(elementIds.tanggal);
-            const kegiatanEl = document.getElementById(elementIds.kegiatan);
-            const penanggungJawabEl = document.getElementById(elementIds.penanggungJawab);
-            const pesertaEl = document.getElementById(elementIds.peserta);
-            const konsumsiEl = document.getElementById(elementIds.konsumsi);
-            const jamMulaiHourEl = document.getElementById(elementIds.jamMulaiHour);
-            const jamMulaiMinuteEl = document.getElementById(elementIds.jamMulaiMinute);
-            const jamSelesaiHourEl = document.getElementById(elementIds.jamSelesaiHour);
-            const jamSelesaiMinuteEl = document.getElementById(elementIds.jamSelesaiMinute);
-
-            // Check if all elements exist
-            const elements = [tanggalEl, kegiatanEl, penanggungJawabEl, pesertaEl, konsumsiEl, jamMulaiHourEl, jamMulaiMinuteEl, jamSelesaiHourEl, jamSelesaiMinuteEl];
-            const missingElements = elements.filter(el => !el);
-
-            if (missingElements.length > 0) {
-                console.error('Missing form elements:', missingElements.length);
-                console.error('Expected IDs:', Object.values(elementIds));
-                console.error('Form prefix:', prefix);
-                throw new Error('Form elements tidak ditemukan');
-            }
-
-            const jamMulaiHour = (jamMulaiHourEl.value || '0').padStart(2, '0');
-            const jamMulaiMinute = (jamMulaiMinuteEl.value || '0').padStart(2, '0');
-            const jamSelesaiHour = (jamSelesaiHourEl.value || '0').padStart(2, '0');
-            const jamSelesaiMinute = (jamSelesaiMinuteEl.value || '0').padStart(2, '0');
-
-            const formData = {
-                tanggal: tanggalEl.value,
-                kegiatan: kegiatanEl.value.trim(),
-                penanggungJawab: penanggungJawabEl.value,
-                peserta: parseInt(pesertaEl.value) || 0,
-                konsumsi: konsumsiEl.value,
-                jamMulai: `${jamMulaiHour}:${jamMulaiMinute}`,
-                jamSelesai: `${jamSelesaiHour}:${jamSelesaiMinute}`
-            };
-
-            console.log('Raw form data:', formData); // Debug log
-            return formData;
-        }
-
-        // Delete Function
-        async function confirmDelete() {
-            if (!currentDeleteId) return;
-
-            // FIXED: Prevent double submissions for delete
-            if (isSubmitting) return;
-            isSubmitting = true;
-
-            const submitBtn = document.getElementById('deleteConfirmBtn');
-            submitBtn.disabled = true;
-            submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Menghapus...';
-
-            try {
-                const response = await makeRequest('deleteBooking', { id: currentDeleteId });
-
-                if (response.success) {
-                    showNotification('Reservasi berhasil dihapus!', 'success');
-                    closeDeleteModal();
-
-                    // If this was the last item on the page and not page 1, go to previous page
-                    if (bookingsData.length === 1 && currentPage > 1) {
-                        loadBookings(currentPage - 1);
-                    } else {
-                        loadBookings(currentPage);
+// ============================================
+// PWA UPDATE DETECTION
+// ============================================
+function checkForUpdates() {
+    if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.register('./sw.js').then(registration => {
+            registration.addEventListener('updatefound', () => {
+                const newWorker = registration.installing;
+                newWorker.addEventListener('statechange', () => {
+                    if (newWorker.state === 'installed' && navigator.serviceWorker.controller) {
+                        showUpdateNotification();
                     }
-
-                    loadStatistics();
-                } else {
-                    throw new Error(response.message || 'Gagal menghapus data');
-                }
-            } catch (error) {
-                console.error('Error deleting booking:', error);
-                showNotification('Gagal menghapus: ' + error.message, 'error');
-            } finally {
-                submitBtn.disabled = false;
-                submitBtn.innerHTML = '<i class="fas fa-trash"></i> Hapus';
-                isSubmitting = false;
-            }
-        }
-
-        // Notification Function
-        function showNotification(message, type) {
-            // Remove existing notifications
-            const existingNotifications = document.querySelectorAll('.notification');
-            existingNotifications.forEach(notif => notif.remove());
-
-            const notification = document.createElement('div');
-            notification.className = `notification ${type}`;
-            notification.textContent = message;
-
-            document.body.appendChild(notification);
-
-            // Animate notification
-            anime({
-                targets: notification,
-                translateX: [300, 0],
-                opacity: [0, 1],
-                duration: 300,
-                easing: 'easeOutQuad'
-            });
-
-            setTimeout(() => {
-                anime({
-                    targets: notification,
-                    translateX: [0, 300],
-                    opacity: [1, 0],
-                    duration: 300,
-                    easing: 'easeInQuad',
-                    complete: () => notification.remove()
                 });
-            }, type === 'error' ? 7000 : 5000);
-        }
-
-        // Keyboard shortcuts
-        document.addEventListener('keydown', function (e) {
-            // Ctrl/Cmd + N for new booking
-            if ((e.ctrlKey || e.metaKey) && e.key === 'n') {
-                e.preventDefault();
-                openAddModal();
-            }
-
-            // Escape to close modals
-            if (e.key === 'Escape') {
-                closeAddModal();
-                closeEditModal();
-                closeDeleteModal();
-            }
-        });
-
-        // Click outside modal to close
-        document.querySelectorAll('.modal-backdrop').forEach(modal => {
-            modal.addEventListener('click', function (e) {
-                if (e.target === this) {
-                    this.classList.remove('show');
-                    startAutoRefresh(); // Restart auto refresh when modal closes
-                }
             });
+
+            setInterval(() => registration.update(), 60000);
         });
+    }
+}
 
-        // Cleanup on page unload
-        window.addEventListener('beforeunload', function () {
-            stopAutoRefresh();
-        });
+function showUpdateNotification() {
+    const notification = document.createElement('div');
+    notification.style.cssText = `
+        position: fixed;
+        top: 20px;
+        right: 20px;
+        background: var(--bps-blue);
+        color: white;
+        padding: 20px;
+        border-radius: 12px;
+        box-shadow: 0 10px 30px rgba(0,0,0,0.3);
+        z-index: 10000;
+        max-width: 350px;
+    `;
+    
+    notification.innerHTML = `
+        <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 12px;">
+            <i class="fas fa-info-circle" style="font-size: 24px;"></i>
+            <div>
+                <h4 style="margin: 0; font-size: 16px;">Update Tersedia</h4>
+                <p style="margin: 4px 0 0 0; font-size: 13px; opacity: 0.9;">Versi baru aplikasi tersedia</p>
+            </div>
+        </div>
+        <button onclick="location.reload()" style="
+            width: 100%;
+            padding: 10px;
+            background: white;
+            color: var(--bps-blue);
+            border: none;
+            border-radius: 8px;
+            font-weight: 600;
+            cursor: pointer;
+        ">
+            <i class="fas fa-sync"></i> Update Sekarang
+        </button>
+    `;
+    
+    document.body.appendChild(notification);
+    setTimeout(() => notification.remove(), 30000);
+}
 
-        // PWA Installation
-        let deferredPrompt;
-        const installButton = document.createElement('button');
-        installButton.style.display = 'none';
-        installButton.className = 'btn-primary';
-        installButton.innerHTML = '<i class="fas fa-download"></i> Install App';
-        installButton.style.position = 'fixed';
-        installButton.style.bottom = '20px';
-        installButton.style.right = '20px';
-        installButton.style.zIndex = '1000';
-        installButton.style.borderRadius = '50px';
-        installButton.style.padding = '12px 20px';
-        installButton.style.boxShadow = '0 4px 12px rgba(234, 88, 12, 0.4)';
+// ============================================
+// EVENT LISTENERS
+// ============================================
+document.addEventListener('keydown', function (e) {
+    if ((e.ctrlKey || e.metaKey) && e.key === 'n') {
+        e.preventDefault();
+        openAddModal();
+    }
+    if (e.key === 'Escape') {
+        closeAddModal();
+        closeEditModal();
+        closeDeleteModal();
+    }
+});
 
-        document.body.appendChild(installButton);
-
-        // PWA Install prompt
-        window.addEventListener('beforeinstallprompt', (e) => {
-            e.preventDefault();
-            deferredPrompt = e;
-            installButton.style.display = 'block';
-        });
-
-        installButton.addEventListener('click', async () => {
-            if (deferredPrompt) {
-                deferredPrompt.prompt();
-                const { outcome } = await deferredPrompt.userChoice;
-                if (outcome === 'accepted') {
-                    installButton.style.display = 'none';
-                }
-                deferredPrompt = null;
-            }
-        });
-
-        // Hide install button if already installed
-        window.addEventListener('appinstalled', () => {
-            installButton.style.display = 'none';
-        });
-
-        // Register Service Worker
-        if ('serviceWorker' in navigator) {
-            window.addEventListener('load', async () => {
-                try {
-                    const registration = await navigator.serviceWorker.register('./sw.js');
-                    console.log('SW registered: ', registration);
-                } catch (registrationError) {
-                    console.log('SW registration failed: ', registrationError);
-                }
-            });
+document.querySelectorAll('.modal-backdrop').forEach(modal => {
+    modal.addEventListener('click', function (e) {
+        if (e.target === this) {
+            this.classList.remove('show');
+            startAutoRefresh();
         }
+    });
+});
+
+window.addEventListener('beforeunload', stopAutoRefresh);
+
+// PWA Install Button
+let deferredPrompt;
+const installButton = document.createElement('button');
+installButton.style.display = 'none';
+installButton.className = 'btn-primary';
+installButton.innerHTML = '<i class="fas fa-download"></i> Install App';
+installButton.style.cssText = 'position:fixed;bottom:20px;right:20px;z-index:1000;border-radius:50px;padding:12px 20px;box-shadow:0 4px 12px rgba(234,88,12,0.4)';
+document.body.appendChild(installButton);
+
+window.addEventListener('beforeinstallprompt', (e) => {
+    e.preventDefault();
+    deferredPrompt = e;
+    installButton.style.display = 'block';
+});
+
+installButton.addEventListener('click', async () => {
+    if (deferredPrompt) {
+        deferredPrompt.prompt();
+        const { outcome } = await deferredPrompt.userChoice;
+        if (outcome === 'accepted') installButton.style.display = 'none';
+        deferredPrompt = null;
+    }
+});
+
+window.addEventListener('appinstalled', () => {
+    installButton.style.display = 'none';
+});
     </script>
 </body>
 
